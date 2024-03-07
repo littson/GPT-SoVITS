@@ -104,10 +104,17 @@ RESP: 无
 import argparse
 import os
 import sys
+from subprocess import Popen
+import json, yaml
+import shutil
 
 now_dir = os.getcwd()
 sys.path.append(now_dir)
 sys.path.append("%s/GPT_SoVITS" % (now_dir))
+
+tmp = os.path.join(now_dir, "TEMP")
+os.makedirs(tmp, exist_ok=True)
+os.environ["TEMP"] = tmp
 
 import signal
 from time import time as ttime
@@ -197,6 +204,8 @@ args = parser.parse_args()
 
 sovits_path = args.sovits_path
 gpt_path = args.gpt_path
+
+print("python:", g_config.python_exec)
 
 
 class DefaultRefer:
@@ -648,6 +657,352 @@ async def tts_endpoint(
 ):
     return handle(refer_wav_path, prompt_text, prompt_language, text, text_language)
 
+
+# ===train start===
+
+project_dir = "/home/vits/GPT-SoVITS"
+upload_dir = "/home/vits/download"
+user_model_dir = "/home/vits/user_model"
+
+
+@app.get("/train")
+async def train(model_id: str = None):
+    global project_dir, upload_dir
+    input_wav = f"{upload_dir}/{model_id}.wav"
+    split_dir = f"{project_dir}/output/slicer_opt"
+    asr_output_dir = f"{project_dir}/output/asr_opt"
+    # split
+    # train_split(input_wav, split_dir)
+    # asr and gen opt list
+    # train_asr(split_dir, asr_output_dir)
+    # prepare 3 steps
+    train_prepare(model_id, f"{asr_output_dir}/slicer_opt.list")
+    # train vits
+    train_vits(model_id)
+    # train gpt
+    # train_gpt(model_id)
+
+    # prepare_model_for_infer(model_id)
+    # clean_model_files(model_id)
+    return JSONResponse({"code": 0, "message": "Success"}, status_code=200)
+
+
+def clean_dir(dir_name):
+    if os.path.exists(dir_name):
+        os.system(f"rm -rf {dir_name}")
+    os.system(f"mkdir {dir_name}")
+
+
+def train_split(input_wav, output_dir):
+    clean_dir(output_dir)
+    cmd = '"%s" tools/slice_audio.py "%s" "%s" %s %s %s %s %s %s %s %s %s' "" % (
+        g_config.python_exec,
+        input_wav,
+        output_dir,
+        "-34",
+        "4000",
+        "300",
+        "10",
+        "500",
+        "0.9",
+        "0.25",
+        "0",
+        "1",
+    )
+    print("split cmd: ", cmd)
+    p = Popen(cmd, shell=True)
+    p.wait()
+    print("split finish")
+
+
+def train_asr(split_dir, output_dir):
+    clean_dir(output_dir)
+    cmd = f'"{g_config.python_exec}" tools/asr/funasr_asr.py'
+    cmd += f' -i "{split_dir}"'
+    cmd += f' -o "{output_dir}"'
+    cmd += f" -s large"
+    cmd += f" -l zh"
+    cmd += " -p %s" % ("float16" if g_config.is_half == True else "float32")
+
+    print("asr cmd: ", cmd)
+    p_asr = Popen(cmd, shell=True)
+    p_asr.wait()
+    print("asr finish")
+
+
+def train_prepare(model_id, inp_text):
+    # start mock
+    bert_pretrained_dir = "GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large"
+    cnhubert_base_dir = "GPT_SoVITS/pretrained_models/chinese-hubert-base"
+    pretrained_s2G = "GPT_SoVITS/pretrained_models/s2G488k.pth"
+    inp_wav_dir = ""
+
+    exp_name = model_id
+    gpu_numbers1a = "0"
+    gpu_numbers1Ba = "0"
+    gpu_numbers1c = "0"
+    ps1abc = []
+    # end mock
+    opt_dir = "%s/%s" % (g_config.exp_root, exp_name)
+
+    print("train_prepare opt_dir:", opt_dir)
+    clean_dir(opt_dir)
+    #############################1a
+    path_text = "%s/2-name2text.txt" % opt_dir
+    if not os.path.exists(path_text) or (
+        os.path.exists(path_text)
+        and len(open(path_text, "r", encoding="utf8").read().strip("\n").split("\n"))
+        < 2
+    ):
+        config = {
+            "inp_text": inp_text,
+            "inp_wav_dir": inp_wav_dir,
+            "exp_name": exp_name,
+            "opt_dir": opt_dir,
+            "bert_pretrained_dir": bert_pretrained_dir,
+            "is_half": str(is_half),
+        }
+        gpu_names = gpu_numbers1a.split("-")
+        all_parts = len(gpu_names)
+        for i_part in range(all_parts):
+            config.update(
+                {
+                    "i_part": str(i_part),
+                    "all_parts": str(all_parts),
+                    "_CUDA_VISIBLE_DEVICES": gpu_names[i_part],
+                }
+            )
+            os.environ.update(config)
+            cmd = (
+                '"%s" GPT_SoVITS/prepare_datasets/1-get-text.py' % g_config.python_exec
+            )
+            print("prepare-1 cmd:", cmd)
+            p = Popen(cmd, shell=True)
+            ps1abc.append(p)
+        for p in ps1abc:
+            p.wait()
+        opt = []
+        for i_part in range(
+            all_parts
+        ):  # txt_path="%s/2-name2text-%s.txt"%(opt_dir,i_part)
+            txt_path = "%s/2-name2text-%s.txt" % (opt_dir, i_part)
+            with open(txt_path, "r", encoding="utf8") as f:
+                opt += f.read().strip("\n").split("\n")
+            os.remove(txt_path)
+        with open(path_text, "w", encoding="utf8") as f:
+            f.write("\n".join(opt) + "\n")
+
+    ps1abc = []
+    #############################1b
+    config = {
+        "inp_text": inp_text,
+        "inp_wav_dir": inp_wav_dir,
+        "exp_name": exp_name,
+        "opt_dir": opt_dir,
+        "cnhubert_base_dir": cnhubert_base_dir,
+    }
+    gpu_names = gpu_numbers1Ba.split("-")
+    all_parts = len(gpu_names)
+    for i_part in range(all_parts):
+        config.update(
+            {
+                "i_part": str(i_part),
+                "all_parts": str(all_parts),
+                "_CUDA_VISIBLE_DEVICES": gpu_names[i_part],
+            }
+        )
+        os.environ.update(config)
+        cmd = (
+            '"%s" GPT_SoVITS/prepare_datasets/2-get-hubert-wav32k.py'
+            % g_config.python_exec
+        )
+        print("prepare-2 cmd:", cmd)
+        p = Popen(cmd, shell=True)
+        ps1abc.append(p)
+    for p in ps1abc:
+        p.wait()
+    ps1abc = []
+    #############################1c
+    path_semantic = "%s/6-name2semantic.tsv" % opt_dir
+    if os.path.exists(path_semantic) == False or (
+        os.path.exists(path_semantic) == True and os.path.getsize(path_semantic) < 31
+    ):
+        config = {
+            "inp_text": inp_text,
+            "exp_name": exp_name,
+            "opt_dir": opt_dir,
+            "pretrained_s2G": pretrained_s2G,
+            "s2config_path": "GPT_SoVITS/configs/s2.json",
+        }
+        gpu_names = gpu_numbers1c.split("-")
+        all_parts = len(gpu_names)
+        for i_part in range(all_parts):
+            config.update(
+                {
+                    "i_part": str(i_part),
+                    "all_parts": str(all_parts),
+                    "_CUDA_VISIBLE_DEVICES": gpu_names[i_part],
+                }
+            )
+            os.environ.update(config)
+            cmd = (
+                '"%s" GPT_SoVITS/prepare_datasets/3-get-semantic.py'
+                % g_config.python_exec
+            )
+            print("prepare-3 cmd:", cmd)
+            p = Popen(cmd, shell=True)
+            ps1abc.append(p)
+        for p in ps1abc:
+            p.wait()
+
+        opt = ["item_name\tsemantic_audio"]
+        for i_part in range(all_parts):
+            semantic_path = "%s/6-name2semantic-%s.tsv" % (opt_dir, i_part)
+            with open(semantic_path, "r", encoding="utf8") as f:
+                opt += f.read().strip("\n").split("\n")
+            os.remove(semantic_path)
+        with open(path_semantic, "w", encoding="utf8") as f:
+            f.write("\n".join(opt) + "\n")
+    ps1abc = []
+    print("prepare finish")
+
+
+def train_vits(model_id):
+    # mock start
+    exp_name = model_id
+    SoVITS_weight_root = "SoVITS_weights"
+    pretrained_s2G = "GPT_SoVITS/pretrained_models/s2G488k.pth"
+    pretrained_s2D = "GPT_SoVITS/pretrained_models/s2D488k.pth"
+    batch_size = 23
+    total_epoch = 24
+    # mock end
+    with open("GPT_SoVITS/configs/s2.json", encoding="utf-8") as f:
+        data = f.read()
+        data = json.loads(data)
+    s2_dir = "%s/%s" % (g_config.exp_root, exp_name)
+    os.makedirs("%s/logs_s2" % (s2_dir), exist_ok=True)
+    if not g_config.is_half:
+        data["train"]["fp16_run"] = False
+        batch_size = max(1, batch_size // 2)
+    data["train"]["batch_size"] = batch_size
+    data["train"]["epochs"] = total_epoch
+    data["train"]["text_low_lr_rate"] = 0.4
+    data["train"]["pretrained_s2G"] = pretrained_s2G
+    data["train"]["pretrained_s2D"] = pretrained_s2D
+    data["train"]["if_save_latest"] = True
+    data["train"]["if_save_every_weights"] = True
+    data["train"]["save_every_epoch"] = 4
+    data["train"]["gpu_numbers"] = "0"
+    data["data"]["exp_dir"] = data["s2_ckpt_dir"] = s2_dir
+    data["save_weight_dir"] = SoVITS_weight_root
+    data["name"] = exp_name
+    tmp_config_path = "%s/tmp_s2.json" % tmp
+    with open(tmp_config_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(data))
+
+    cmd = '"%s" GPT_SoVITS/s2_train.py --config "%s"' % (
+        g_config.python_exec,
+        tmp_config_path,
+    )
+    print("train vits cmd:", cmd)
+    p_train_SoVITS = Popen(cmd, shell=True)
+    p_train_SoVITS.wait()
+
+
+def train_gpt(model_id):
+    exp_name = model_id
+    pretrained_s1 = (
+        "GPT_SoVITS/pretrained_models/s1bert25hz-2kh-longer-epoch=68e-step=50232.ckpt"
+    )
+    GPT_weight_root = "GPT_weights"
+    batch_size = 23
+    total_epoch = 10
+
+    with open("GPT_SoVITS/configs/s1longer.yaml", encoding="utf-8") as f:
+        data = f.read()
+        data = yaml.load(data, Loader=yaml.FullLoader)
+    s1_dir = "%s/%s" % (g_config.exp_root, exp_name)
+    os.makedirs("%s/logs_s1" % (s1_dir), exist_ok=True)
+    if is_half == False:
+        data["train"]["precision"] = "32"
+        batch_size = max(1, batch_size // 2)
+    data["train"]["batch_size"] = batch_size
+    data["train"]["epochs"] = total_epoch
+    data["pretrained_s1"] = pretrained_s1
+    data["train"]["save_every_n_epoch"] = 5
+    data["train"]["if_save_every_weights"] = True
+    data["train"]["if_save_latest"] = True
+    data["train"]["if_dpo"] = False
+    data["train"]["half_weights_save_dir"] = GPT_weight_root
+    data["train"]["exp_name"] = exp_name
+    data["train_semantic_path"] = "%s/6-name2semantic.tsv" % s1_dir
+    data["train_phoneme_path"] = "%s/2-name2text.txt" % s1_dir
+    data["output_dir"] = "%s/logs_s1" % s1_dir
+
+    os.environ["_CUDA_VISIBLE_DEVICES"] = "0".replace("-", ",")
+    os.environ["hz"] = "25hz"
+    tmp_config_path = "%s/tmp_s1.yaml" % tmp
+    with open(tmp_config_path, "w", encoding="utf-8") as f:
+        f.write(yaml.dump(data, default_flow_style=False))
+    # cmd = '"%s" GPT_SoVITS/s1_train.py --config_file "%s" --train_semantic_path "%s/6-name2semantic.tsv" --train_phoneme_path "%s/2-name2text.txt" --output_dir "%s/logs_s1"'%(python_exec,tmp_config_path,s1_dir,s1_dir,s1_dir)
+    cmd = '"%s" GPT_SoVITS/s1_train.py --config_file "%s" ' % (
+        g_config.python_exec,
+        tmp_config_path,
+    )
+    print("train gpt cmd:", cmd)
+    p_train_GPT = Popen(cmd, shell=True)
+    p_train_GPT.wait()
+    p_train_GPT = None
+
+
+def prepare_model_for_infer(model_id):
+    import ffmpeg
+
+    # refer.wav refer.txt
+    global upload_dir, project_dir, user_model_dir
+    input_wav = f"{upload_dir}/{model_id}.wav"
+    model_dir = f"{user_model_dir}/{model_id}"
+    refer_wav = f"{model_dir}/refer.wav"
+    refer_text = f"{model_dir}/refer.txt"
+    gpt_model = f"{model_dir}/gpt.ckpt"
+    vits_model = f"{model_dir}/vits.pth"
+
+    clean_dir(model_dir)
+    # ffmpeg to cut first 5s of `input_wav`:
+    ffmpeg.input(input_wav).output(refer_wav, t="5").run(
+        overwrite_output=True, capture_stdout=True, capture_stderr=True
+    )
+    cmd = f'"{g_config.python_exec}" tools/asr/asr_simple.py'
+    cmd += f' -i "{refer_wav}"'
+    cmd += f' -o "{refer_text}"'
+
+    print("asr cmd: ", cmd)
+    p_asr = Popen(cmd, shell=True)
+    p_asr.wait()
+    print("refer asr finish")
+
+    # copy gpt and vits model to user_model_dir
+    shutil.copy(f"{project_dir}/GPT_weights/{model_id}-e10.ckpt", gpt_model)
+    shutil.copy(f"{project_dir}/SoVITS_weights/{model_id}_e24_s144.pth", vits_model)
+
+
+def clean_model_files(model_id):
+    pass
+
+
+from fastapi import UploadFile, File
+
+
+@app.post("/upload")
+async def upload(file_name: str, file: UploadFile = File(...)):
+    global upload_dir
+    with open(f"{upload_dir}/{file_name}", "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    return JSONResponse({"code": 0, "message": "Success"}, status_code=200)
+
+
+# ===train end===
 
 if __name__ == "__main__":
     uvicorn.run(app, host=host, port=port, workers=1)

@@ -15,6 +15,7 @@ import sys, pdb
 
 now_dir = os.getcwd()
 sys.path.append(now_dir)
+sys.path.append("%s/GPT_SoVITS" % (now_dir))
 from random import shuffle
 import torch.multiprocessing as mp
 from glob import glob

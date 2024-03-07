@@ -1,6 +1,21 @@
 # -*- coding: utf-8 -*-
 
+
 import os
+import sys, numpy as np, traceback, pdb
+import os.path
+from glob import glob
+from tqdm import tqdm
+import torch
+from transformers import AutoModelForMaskedLM, AutoTokenizer
+import numpy as np
+
+now_dir = os.getcwd()
+sys.path.append(now_dir)
+sys.path.append("%s/GPT_SoVITS" % (now_dir))
+
+from text.cleaner import clean_text
+
 
 inp_text = os.environ.get("inp_text")
 inp_wav_dir = os.environ.get("inp_wav_dir")
@@ -11,14 +26,6 @@ os.environ["CUDA_VISIBLE_DEVICES"] = os.environ.get("_CUDA_VISIBLE_DEVICES")
 opt_dir = os.environ.get("opt_dir")
 bert_pretrained_dir = os.environ.get("bert_pretrained_dir")
 is_half = eval(os.environ.get("is_half", "True"))
-import sys, numpy as np, traceback, pdb
-import os.path
-from glob import glob
-from tqdm import tqdm
-from text.cleaner import clean_text
-import torch
-from transformers import AutoModelForMaskedLM, AutoTokenizer
-import numpy as np
 
 # inp_text=sys.argv[1]
 # inp_wav_dir=sys.argv[2]
@@ -33,13 +40,13 @@ from time import time as ttime
 import shutil
 
 
-def my_save(fea,path):#####fix issue: torch.save doesn't support chinese path
-    dir=os.path.dirname(path)
-    name=os.path.basename(path)
+def my_save(fea, path):  #####fix issue: torch.save doesn't support chinese path
+    dir = os.path.dirname(path)
+    name = os.path.basename(path)
     # tmp_path="%s/%s%s.pth"%(dir,ttime(),i_part)
-    tmp_path="%s%s.pth"%(ttime(),i_part)
-    torch.save(fea,tmp_path)
-    shutil.move(tmp_path,"%s/%s"%(dir,name))
+    tmp_path = "%s%s.pth" % (ttime(), i_part)
+    torch.save(fea, tmp_path)
+    shutil.move(tmp_path, "%s/%s" % (dir, name))
 
 
 txt_path = "%s/2-name2text-%s.txt" % (opt_dir, i_part)
